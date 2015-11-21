@@ -1,0 +1,195 @@
+Embedding kobjects
+内嵌 kobject
+
+It is rare for kernel code to create a standalone kobject, with one major
+exception explained below.  Instead, kobjects are used to control access to
+a larger, domain-specific object.  To this end, kobjects will be found
+embedded in other structures.  If you are used to thinking of things in
+object-oriented terms, kobjects can be seen as a top-level, abstract class
+from which other classes are derived.  A kobject implements a set of
+capabilities which are not particularly useful by themselves, but which are
+nice to have in other objects.  The C language does not allow for the
+direct expression of inheritance, so other techniques - such as structure
+embedding - must be used.
+就内核代码而言，基本上不会创建一个单独的 kobject，但也有例外，这以后再说。
+其实，kobject 通常被用来控制一个更大的特定域对象。因此你将发现 kobject 都被
+嵌入到了其他的结构体当中。如果从面向对象的观点出发，那么 kobject 可以被看做
+是被其他类继承的、顶层的、抽象的类。一个 kobject 实现了一组对于它们自己不是
+很有用，但对那些包含了这个 kobject 的对象很有用的功能。另外 C 语言不支持直接
+使用继承，所以必须依靠其他的技术来实现，比如结构体嵌套。
+
+(As an aside, for those familiar with the kernel linked list implementation,
+this is analogous as to how "list_head" structs are rarely useful on
+their own, but are invariably found embedded in the larger objects of
+interest.)
+（顺便说一句，对于那些熟悉内核链表实现的同志来说，这和“list_head”结构体很
+类似。它们都是本身没什么用，其真正的价值是在嵌套进一个更大的结构体中才得以
+体现。）
+
+So, for example, the UIO code in drivers/uio/uio.c has a structure that
+defines the memory region associated with a uio device:
+举一个例子，drivers/uio/uio.c 里的 UIO 代码包含一个定义了内存区域的 uio 设备。
+
+
+    struct uio_map {
+        struct kobject kobj;
+        struct uio_mem *mem;
+    };
+
+
+
+If you have a struct uio_map structure, finding its embedded kobject is
+just a matter of using the kobj member.  Code that works with kobjects will
+often have the opposite problem, however: given a struct kobject pointer,
+what is the pointer to the containing structure?  You must avoid tricks
+(such as assuming that the kobject is at the beginning of the structure)
+and, instead, use the container_of() macro, found in :
+如果你有一个 struct uio_map 结构体，使用它的成员 kobj 就能找到嵌套的 kobject。
+但是操作 kobject 的代码往往会引出一个相反的问题：如果给定一个 struct kobject
+指针，那么包含这个指针的结构体又是什么呢？别投机取巧（比如假设这个 kobject
+是该结构体的第一个字段），你应该使用 container_of() 宏函数：
+
+    container_of(pointer, type, member)
+
+
+where:
+其中：
+
+  * "pointer" is the pointer to the embedded kobject,
+  * "type" is the type of the containing structure, and
+  * "member" is the name of the structure field to which "pointer" points.
+ ＊ "pointer" 被嵌入的 kobject。
+ ＊ "type" 包含 kobject 的结构体类型。
+ ＊ "member" 该结构体中指向 kobject 指针的字段名。
+
+The return value from container_of() is a pointer to the corresponding
+container type. So, for example, a pointer "kp" to a struct kobject
+embedded *within* a struct uio_map could be converted to a pointer to the
+*containing* uio_map structure with:
+container_of() 的返回值就是一个相应结构体的指针。例如，一个指向嵌套在 uio_map
+里的 struct kobject 的指针“kp”，可以这样获得包含它的结构体的指针： 
+
+    struct uio_map *u_map = container_of(kp, struct uio_map, kobj);
+
+
+For convenience, programmers often define a simple macro for "back-casting"
+kobject pointers to the containing type.  Exactly this happens in the
+earlier drivers/uio/uio.c, as you can see here:
+为方便起见，程序员通常会定义一个简单的宏，用于“反指”包含这个 kobject 的容器
+类型指针。正因为这样，在以前的文件 drivers/uio/uio.c 中你可以看到：
+
+
+    struct uio_map {
+        struct kobject kobj;
+        struct uio_mem *mem;
+    };
+
+    #define to_map(map) container_of(map, struct uio_map, kobj)
+
+
+where the macro argument "map" is a pointer to the struct kobject in
+question.  That macro is subsequently invoked with:
+宏参数“map”是一个指向 struct kobject 的指针。这个宏函数将随后被调用：
+
+    struct uio_map *map = to_map(kobj);
+
+
+Initialization of kobjects
+kobject 的初始化
+
+Code which creates a kobject must, of course, initialize that object. Some
+of the internal fields are setup with a (mandatory) call to kobject_init():
+创建一个 kobject 的代码首先必须初始化这个对象。调用 kobject_init() 来设置一些
+内部字段（强制性的）。
+
+    void kobject_init(struct kobject *kobj, struct kobj_type *ktype);
+
+
+The ktype is required for a kobject to be created properly, as every kobject
+must have an associated kobj_type.  After calling kobject_init(), to
+register the kobject with sysfs, the function kobject_add() must be called:
+因为每一个 kobject 都有一个关联的 kobj_type，所以正确创建一个 kobject 时
+ktype 是必须的。调用 kobject_init() 之后，必须是用 kobject_add() 在 sysfs 上
+注册 kobject。
+
+    int kobject_add(struct kobject *kobj, struct kobject *parent, const char *fmt, ...);
+
+
+This sets up the parent of the kobject and the name for the kobject
+properly.  If the kobject is to be associated with a specific kset,
+kobj->kset must be assigned before calling kobject_add().  If a kset is
+associated with a kobject, then the parent for the kobject can be set to
+NULL in the call to kobject_add() and then the kobject's parent will be the
+kset itself.
+这将为 kobject 设置 parent 和 name。如果这个 kobject 将关联于一个指定的
+kset，那么 kobj->kset 必须在 kobject_add() 之前被分配好。如果一个 ket 关联
+于一个 kobject，那么在调用 kobject_add() 时 parent 可以是 NULL，这时 kobject
+的 parent 将会是这个 kset 本身。
+
+As the name of the kobject is set when it is added to the kernel, the name
+of the kobject should never be manipulated directly.  If you must change
+the name of the kobject, call kobject_rename():
+当一个 kobject 的 name 已经被设置并添加经 kernel 之后，就不允许直接操作这个
+kobject 的 name 了。如果你必须修改这个 name，请使用 kobject_rename():
+
+    int kobject_rename(struct kobject *kobj, const char *new_name);
+
+
+kobject_rename does not perform any locking or have a solid notion of
+what names are valid so the caller must provide their own sanity checking
+and serialization.
+kobject_rename 不会执行任何锁定操作，也不会验证 name 的有效性，所以调用者
+必须提供自己的完整性检查和序列化。
+
+There is a function called kobject_set_name() but that is legacy cruft and
+is being removed.  If your code needs to call this function, it is
+incorrect and needs to be fixed.
+这里有一个函数 kobject_set_name()，但这个函数是遗留问题，而且在将来会被删
+除。如果你的代码需要调用这个函数，那么这将是不正确的并且必须被修正。
+
+To properly access the name of the kobject, use the function
+要正确访问 kobject 的 name，使用这个函数
+kobject_name():
+
+    const char *kobject_name(const struct kobject * kobj);
+
+
+There is a helper function to both initialize and add the kobject to the
+kernel at the same time, called surprisingly enough kobject_init_and_add():
+这里有一个辅助函数将同时初始化 kobject 并将其添加至 kernel，kobject_init_and_add():
+
+    int kobject_init_and_add(struct kobject *kobj, struct kobj_type *ktype,
+                             struct kobject *parent, const char *fmt, ...);
+
+
+The arguments are the same as the individual kobject_init() and
+kobject_add() functions described above.
+其中的参数与 kobject_init() 和 kobject_add() 里描述的一致。
+
+
+Uevents
+
+After a kobject has been registered with the kobject core, you need to
+announce to the world that it has been created.  This can be done with a
+call to kobject_uevent():
+在一个 kobject 注册之后，你需要通过 kobject_uevent() 向全局宣布它被创建了。
+
+    int kobject_uevent(struct kobject *kobj, enum kobject_action action);
+
+
+Use the KOBJ_ADD action for when the kobject is first added to the kernel.
+This should be done only after any attributes or children of the kobject
+have been initialized properly, as userspace will instantly start to look
+for them when this call happens.
+当 kobject 首次被添加进 kernel 时，使用 KOBJ_ADD action。这个调用必须在所有
+的 attributes 或 children 都被正确初始化之后，因为当这个调用发生时，用户空间将
+会立即开始寻找它们。
+
+When the kobject is removed from the kernel (details on how to do that is
+below), the uevent for KOBJ_REMOVE will be automatically created by the
+kobject core, so the caller does not have to worry about doing that by
+hand.
+当 kobject 从 kernel 中移除时，KOBJ_REMOVE 的 uevent 将会被 kobject core
+自动创建，所以调用者不必担心手动完成这些。
+
+
